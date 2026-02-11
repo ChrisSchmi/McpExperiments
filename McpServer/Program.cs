@@ -7,7 +7,7 @@ using ModelContextProtocol.Server;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Logging auf stderr
+// Logging to stderr
 builder.Logging.AddConsole(consoleLogOptions =>
 {
     consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace;
@@ -19,8 +19,7 @@ var options = new McpServerOptions()
     {
         Name = "Christians MCP Server",
         Version = "1.0.0"
-    },
-
+    }
 };
 
 // MCP Services 
@@ -33,7 +32,6 @@ var app = builder.Build();
 
 // ✅ HTTP MCP Endpoint 
 app.MapMcp("/mcp");
-
 
 Console.WriteLine("🚀 MCP Server on http://localhost:5000/mcp");
 Console.WriteLine("Press Ctrl+C to exit");

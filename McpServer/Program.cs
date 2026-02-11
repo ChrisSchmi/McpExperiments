@@ -2,7 +2,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using ModelContextProtocol.AspNetCore;  // ✅ Für MapMcp()
+using ModelContextProtocol.AspNetCore;  // ✅ For MapMcp()
 using ModelContextProtocol.Server;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -12,7 +12,6 @@ builder.Logging.AddConsole(consoleLogOptions =>
 {
     consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace;
 });
-
 
 var options = new McpServerOptions()
 {
@@ -24,8 +23,7 @@ var options = new McpServerOptions()
 
 };
 
-
-// MCP Services registrieren
+// MCP Services 
 builder.Services
     .AddMcpServer()
     .WithHttpTransport()
@@ -33,11 +31,11 @@ builder.Services
 
 var app = builder.Build();
 
-// ✅ HTTP MCP Endpoint (POST + SSE GET)
+// ✅ HTTP MCP Endpoint 
 app.MapMcp("/mcp");
 
 
-Console.WriteLine("🚀 MCP Server läuft auf http://localhost:5000/mcp");
+Console.WriteLine("🚀 MCP Server on http://localhost:5000/mcp");
 Console.WriteLine("Press Ctrl+C to exit");
 
 await app.RunAsync();

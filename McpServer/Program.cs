@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Builder;
+﻿using AspNetCoreMcpServer.Tools;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -6,6 +7,10 @@ using ModelContextProtocol.AspNetCore;  // ✅ For MapMcp()
 using ModelContextProtocol.Server;
 
 var builder = WebApplication.CreateBuilder(args);
+
+#if DEBUG
+    builder.WebHost.UseUrls("http://localhost:5000"); 
+#endif
 
 // Logging to stderr
 builder.Logging.AddConsole(consoleLogOptions =>
@@ -24,8 +29,12 @@ var options = new McpServerOptions()
 
 // MCP Services 
 builder.Services
+    .AddHttpClient()
     .AddMcpServer()
     .WithHttpTransport()
+    // .WithTools<EchoTool>()
+    // .WithTools<ReverseTool>()
+    // .WithTools<SummarizeTool>();
     .WithToolsFromAssembly();
 
 var app = builder.Build();

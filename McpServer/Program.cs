@@ -29,6 +29,7 @@ var options = new McpServerOptions()
 
 // MCP Services 
 builder.Services
+    .Configure<LlmConfig>(builder.Configuration.GetSection("Llm"))
     .AddHttpClient()
     .AddMcpServer()
     .WithHttpTransport()

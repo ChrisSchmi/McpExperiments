@@ -36,7 +36,8 @@ builder.Services
     // .WithTools<EchoTool>()
     // .WithTools<ReverseTool>()
     // .WithTools<SummarizeTool>();
-    .WithToolsFromAssembly();
+    .WithPromptsFromAssembly() // ✅ Automatically register all prompts from the assembly
+    .WithToolsFromAssembly();  // ✅ Automatically register all tools from the assembly
 
 var app = builder.Build();
 

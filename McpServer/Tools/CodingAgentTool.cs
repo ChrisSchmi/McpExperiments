@@ -5,26 +5,32 @@ using ModelContextProtocol.Server;
 using System.Text;
 using System.Linq;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 
 namespace CodingAgent.Tools;
 
 [McpServerToolType]
 public class CodingAgentTool
 {
+    private const int MaxFileReadChars = 50000;
+    private const int DefaultMaxSearchResults = 100;
+    private const int MaxSearchResults = 500;
 
     private readonly LlmConfig _config;
     private readonly HttpClient _httpClient;
+    private readonly ILogger<CodingAgentTool>? _logger;
 
-    public CodingAgentTool(IOptions<LlmConfig> config, HttpClient httpClient)
+    public CodingAgentTool(IOptions<LlmConfig> config, HttpClient httpClient, ILogger<CodingAgentTool>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(httpClient);
 
         _config = config.Value;
         _httpClient = httpClient;
+        _logger = logger;
     }
-    private string[] AllowedRoots => [Path.GetFullPath(_config.AllowedCodeDirectory)];
 
+    private string[] AllowedRoots => [Path.GetFullPath(_config.AllowedCodeDirectory)];
 
     private static readonly HashSet<string> SearchableExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -36,100 +42,179 @@ public class CodingAgentTool
     public string ListAllowedDirectories()
         => JsonSerializer.Serialize(AllowedRoots);
 
-    [McpServerTool(Name ="list_directory")]
+    [McpServerTool(Name = "list_directory")]
     [Description("Lists files and subdirectories within an allowed root directory.")]
     public string ListDirectory(
         [Description("Relative path inside an allowed root, e.g. 'src' or ''.")] string path = "")
     {
-        var fullPath = ResolvePath(path);
-        if (fullPath is null || !Directory.Exists(fullPath))
-            return JsonSerializer.Serialize(new { error = "Access denied or path not found" });
+        try
+        {
+            var fullPath = ResolvePath(path);
+            if (fullPath is null || !Directory.Exists(fullPath))
+                return JsonSerializer.Serialize(new { error = "Access denied or path not found" });
 
-        var entries = Directory.EnumerateFileSystemEntries(fullPath)
-            .Select(entry => (object)(Directory.Exists(entry) ? 
-                new { name = Path.GetFileName(entry), type = "dir" } :
-                new { name = Path.GetFileName(entry), type = "file", size = new FileInfo(entry).Length }))
-            .ToList();
+            var entries = Directory.EnumerateFileSystemEntries(fullPath)
+                .Select(entry => (object)(Directory.Exists(entry) ? 
+                    new { name = Path.GetFileName(entry), type = "dir" } :
+                    new { name = Path.GetFileName(entry), type = "file", size = new FileInfo(entry).Length }))
+                .ToList();
 
-        return JsonSerializer.Serialize(new { path, entries });
+            return JsonSerializer.Serialize(new { path, entries });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return JsonSerializer.Serialize(new { error = "Access denied" });
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Error listing directory: {Path}", path);
+            return JsonSerializer.Serialize(new { error = "Could not list directory" });
+        }
     }
 
-    [McpServerTool(Name ="get_file_info")]
+    [McpServerTool(Name = "get_file_info")]
     [Description("Returns metadata for a file or directory within an allowed root.")]
     public string GetFileInfo([Description("Relative path inside an allowed root.")] string path)
     {
-        var fullPath = ResolvePath(path);
-        if (fullPath is null) return JsonSerializer.Serialize(new { error = "Access denied" });
-
-        if (File.Exists(fullPath))
+        try
         {
-            var info = new FileInfo(fullPath);
-            return JsonSerializer.Serialize(new
-            {
-                path,
-                type = "file",
-                size = info.Length,
-                modified = info.LastWriteTimeUtc
-            });
-        }
+            var fullPath = ResolvePath(path);
+            if (fullPath is null) 
+                return JsonSerializer.Serialize(new { error = "Access denied" });
 
-        if (Directory.Exists(fullPath))
+            if (File.Exists(fullPath))
+            {
+                var info = new FileInfo(fullPath);
+                return JsonSerializer.Serialize(new
+                {
+                    path,
+                    type = "file",
+                    size = info.Length,
+                    modified = info.LastWriteTimeUtc
+                });
+            }
+
+            if (Directory.Exists(fullPath))
+            {
+                var info = new DirectoryInfo(fullPath);
+                return JsonSerializer.Serialize(new
+                {
+                    path,
+                    type = "dir",
+                    modified = info.LastWriteTimeUtc
+                });
+            }
+
+            return JsonSerializer.Serialize(new { path, error = "not found" });
+        }
+        catch (UnauthorizedAccessException)
         {
-            var info = new DirectoryInfo(fullPath);
-            return JsonSerializer.Serialize(new
-            {
-                path,
-                type = "dir",
-                modified = info.LastWriteTimeUtc
-            });
+            return JsonSerializer.Serialize(new { error = "Access denied" });
         }
-
-        return JsonSerializer.Serialize(new { path, error = "not found" });
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Error getting file info: {Path}", path);
+            return JsonSerializer.Serialize(new { error = "Could not retrieve file info" });
+        }
     }
 
     [McpServerTool(Name = "read_file")]
     [Description("Reads a text file within an allowed root directory.")]
-    public async Task<string> ReadFile([Description("Relative path inside an allowed root.")] string path)
+    public async Task<string> ReadFile(
+        [Description("Relative path inside an allowed root.")] string path,
+        CancellationToken cancellationToken = default)
     {
-        var fullPath = ResolvePath(path);
-        if (fullPath is null || !File.Exists(fullPath))
-            return JsonSerializer.Serialize(new { error = "File not found or access denied" });
-
         try
         {
-            var content = await File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-            const int maxChars = 50000;
-            var result = content.Length > maxChars ? content[..maxChars] + "\n... [truncated]" : content;
-            return JsonSerializer.Serialize(new { path, content = result, truncated = content.Length > maxChars });
+            if (string.IsNullOrWhiteSpace(path))
+                return JsonSerializer.Serialize(new { error = "Path cannot be empty" });
+
+            var fullPath = ResolvePath(path);
+            if (fullPath is null || !File.Exists(fullPath))
+                return JsonSerializer.Serialize(new { error = "File not found or access denied" });
+
+            var content = await File.ReadAllTextAsync(fullPath, Encoding.UTF8, cancellationToken);
+            var truncated = content.Length > MaxFileReadChars;
+            var result = truncated ? content[..MaxFileReadChars] + "\n... [truncated]" : content;
+            
+            return JsonSerializer.Serialize(new { path, content = result, truncated });
         }
-        catch
+        catch (UnauthorizedAccessException)
         {
+            return JsonSerializer.Serialize(new { error = "Access denied to file" });
+        }
+        catch (OperationCanceledException)
+        {
+            return JsonSerializer.Serialize(new { error = "Operation cancelled" });
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Error reading file: {Path}", path);
             return JsonSerializer.Serialize(new { error = "Could not read file" });
         }
     }
 
-    [McpServerTool(Name ="search_in_files")]
+    [McpServerTool(Name = "search_in_files")]
     [Description("Searches text inside files under an allowed root.")]
-    public string SearchInFiles(
+    public async Task<string> SearchInFiles(
         [Description("Relative root path inside an allowed root.")] string root,
         [Description("Search text.")] string query,
-        [Description("Max matches.")] int maxResults = 100)
+        [Description("Max matches.")] int maxResults = DefaultMaxSearchResults,
+        CancellationToken cancellationToken = default)
     {
-        var fullRoot = ResolvePath(root);
-        if (fullRoot is null || !Directory.Exists(fullRoot))
-            return JsonSerializer.Serialize(new { error = "Root not found" });
-
-        maxResults = Math.Clamp(maxResults, 1, 500);
-        var matches = new List<object>();
-
-        foreach (var file in EnumerateSearchableFiles(fullRoot))
+        try
         {
-            if (matches.Count >= maxResults) break;
+            if (string.IsNullOrWhiteSpace(query))
+                return JsonSerializer.Serialize(new { error = "Query cannot be empty" });
 
-            try
+            var fullRoot = ResolvePath(root);
+            if (fullRoot is null || !Directory.Exists(fullRoot))
+                return JsonSerializer.Serialize(new { error = "Root not found or access denied" });
+
+            maxResults = Math.Clamp(maxResults, 1, MaxSearchResults);
+            var matches = new List<object>();
+
+            foreach (var file in EnumerateSearchableFiles(fullRoot))
             {
-                var lineNumber = 0;
-                foreach (var line in File.ReadLines(file, Encoding.UTF8))
+                cancellationToken.ThrowIfCancellationRequested();
+                if (matches.Count >= maxResults) break;
+
+                await SearchFileAsync(file, fullRoot, query, matches, maxResults, cancellationToken);
+            }
+
+            return JsonSerializer.Serialize(new { query, root, matches, count = matches.Count });
+        }
+        catch (OperationCanceledException)
+        {
+            return JsonSerializer.Serialize(new { error = "Search cancelled" });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return JsonSerializer.Serialize(new { error = "Access denied to root directory" });
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Error searching in files under: {Root}", root);
+            return JsonSerializer.Serialize(new { error = "Search operation failed" });
+        }
+    }
+
+    private async Task SearchFileAsync(
+        string file,
+        string fullRoot,
+        string query,
+        List<object> matches,
+        int maxResults,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using (var reader = new StreamReader(file, Encoding.UTF8))
+            {
+                string? line;
+                int lineNumber = 0;
+
+                while ((line = await reader.ReadLineAsync(cancellationToken)) != null)
                 {
                     lineNumber++;
                     if (line.Contains(query, StringComparison.OrdinalIgnoreCase))
@@ -140,14 +225,29 @@ public class CodingAgentTool
                             line = lineNumber,
                             content = line.TrimEnd()
                         });
+
+                        if (matches.Count >= maxResults)
+                            break;
                     }
-                    if (matches.Count >= maxResults) break;
                 }
             }
-            catch { }
         }
-
-        return JsonSerializer.Serialize(new { query, root, matches });
+        catch (UnauthorizedAccessException)
+        {
+            _logger?.LogDebug("Access denied to file: {File}", file);
+        }
+        catch (IOException ioEx)
+        {
+            _logger?.LogDebug(ioEx, "IO error reading file: {File}", file);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Error searching file: {File}", file);
+        }
     }
 
     private IEnumerable<string> EnumerateSearchableFiles(string root)
@@ -155,23 +255,55 @@ public class CodingAgentTool
         try
         {
             return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-                .Where(f => SearchableExtensions.Contains(Path.GetExtension(f)));
+                .Where(f => SearchableExtensions.Contains(Path.GetExtension(f)))
+                .ToList();
         }
-        catch
+        catch (UnauthorizedAccessException)
         {
+            _logger?.LogDebug("Access denied while enumerating files in: {Root}", root);
+            return [];
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Error enumerating files in: {Root}", root);
             return [];
         }
     }
 
+    /// <summary>
+    /// Safely resolves a relative path within allowed root directories.
+    /// Prevents path traversal attacks by validating the resolved path stays within the root.
+    /// </summary>
     private string? ResolvePath(string path)
     {
-        if (string.IsNullOrWhiteSpace(path)) path = ".";
+        if (string.IsNullOrWhiteSpace(path))
+            path = ".";
+
         foreach (var root in AllowedRoots)
         {
-            var combined = Path.GetFullPath(Path.Combine(root, path));
-            if (combined.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-                return combined;
+            try
+            {
+                // Normalize both paths to absolute, canonical form
+                var normalizedRoot = Path.GetFullPath(root);
+                var combinedPath = Path.GetFullPath(Path.Combine(normalizedRoot, path));
+
+                // Ensure the resolved path is within the allowed root
+                // Check both with trailing separator and exact match
+                var withSeparator = normalizedRoot + Path.DirectorySeparatorChar;
+                if (combinedPath.StartsWith(withSeparator, StringComparison.OrdinalIgnoreCase) ||
+                    combinedPath.Equals(normalizedRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    return combinedPath;
+                }
+
+                _logger?.LogWarning("Path traversal attempt detected: {RequestedPath}", path);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogDebug(ex, "Error resolving path: {Path}", path);
+            }
         }
+
         return null;
     }
 }

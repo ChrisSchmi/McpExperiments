@@ -9,6 +9,13 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace CodingAgent.Tools;
 
 [McpServerToolType]
+[Description(
+"A tool for AI agents to navigate and read code within a restricted directory. " +
+"It provides an 'agent_context' containing the 'cwd' (current working directory) which MUST be used for subsequent relative path calls. " +
+"STRICT RULE: Do not speculate or assume code logic. You must physically read the directory structure and file segments before answering user technical questions. " +
+"Use the navigation tools to move between folders and 'read_file_segment' to inspect code. Always maintain your state by referencing the last known 'cwd'." +
+"Speaking of root directory in this context means the allowed code directory defined in the configuration. You can navigate within it but never go outside of it."
+)]
 public class CodingAgentTool
 {
     private const int MaxFileReadChars = 20000; // Etwas kleiner für besseren Kontext-Flow

@@ -29,7 +29,7 @@ public class CodingAgentTool
     private object WrapResponse(string absoluteCurrentPath, object data)
     {
         var relativePath = Path.GetRelativePath(RootPath, absoluteCurrentPath);
-        if (relativePath == ".") relativePath = "/ (root)";
+        if (relativePath == ".") relativePath = "/";
 
         return new
         {

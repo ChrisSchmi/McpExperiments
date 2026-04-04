@@ -27,10 +27,13 @@ public class CodingAgentTool
 
     private string[] AllowedRoots => [Path.GetFullPath(_config.AllowedCodeDirectory)];
 
-    private object WithContext(string currentWorkingDirectory, object payload) => new
+    private object WithContext(string currentPath, object payload) => new
     {
-        currentWorkingDirectory = currentWorkingDirectory,
-        payload
+        internal_state = new {
+            cwd = currentPath,
+            instruction = $"The user is currently browsing {currentPath}. Use this as the base for all relative paths."
+        },
+        data = payload
     };
 
     [McpServerTool(Name = "list_allowed_directories")]
@@ -80,13 +83,60 @@ public class CodingAgentTool
                 };
             }
 
+            // var entries = Directory.EnumerateFileSystemEntries(fullPath)
+            //     .Select(entry => (object)(Directory.Exists(entry) ? 
+            //         new { name = Path.GetFileName(entry), type = "dir" } :
+            //         new { name = Path.GetFileName(entry), type = "file", size = new FileInfo(entry).Length }))
+            //     .ToList();
+
+            // return WithContext(path,new { entries });
+
             var entries = Directory.EnumerateFileSystemEntries(fullPath)
-                .Select(entry => (object)(Directory.Exists(entry) ? 
-                    new { name = Path.GetFileName(entry), type = "dir" } :
-                    new { name = Path.GetFileName(entry), type = "file", size = new FileInfo(entry).Length }))
+                .Select(entry => {
+                    var isDir = Directory.Exists(entry);
+                    var name = Path.GetFileName(entry);
+                    var relPath = Path.GetRelativePath(_config.AllowedCodeDirectory, entry);
+                    
+                    if (isDir)
+                    {
+                        return (object)new 
+                        { 
+                            name, 
+                            type = "dir", 
+                            relativePath = relPath, // Wichtig für Tool-Input
+                            fullPath = entry,
+                            isEmpty = !Directory.EnumerateFileSystemEntries(entry).Any()
+                        };
+                    }
+                    else
+                    {
+                        var fileInfo = new FileInfo(entry);
+                        return (object)new 
+                        { 
+                            name, 
+                            type = "file", 
+                            size = fileInfo.Length,
+                            extension = fileInfo.Extension,
+                            relativePath = relPath,
+                            fullPath = entry,
+                            lastModified = fileInfo.LastWriteTime
+                        };
+                    }
+                })
                 .ToList();
 
-            return WithContext(path,new { entries });
+            // Das entscheidende "Context-Wrapping"
+            return WithContext(fullPath,
+                new { 
+                    context = new {
+                        currentDirectoryName = Path.GetFileName(fullPath),
+                        currentRelativePath = Path.GetRelativePath(_config.AllowedCodeDirectory, fullPath),
+                        parentDirectory = Path.GetRelativePath(_config.AllowedCodeDirectory, Path.GetDirectoryName(fullPath) ?? _config.AllowedCodeDirectory),
+                        isRoot = fullPath.Equals(Path.GetFullPath(_config.AllowedCodeDirectory), StringComparison.OrdinalIgnoreCase),
+                        totalEntryCount = entries.Count
+                    },
+                    entries 
+                });            
         }
         catch (Exception ex)
         {
@@ -105,17 +155,23 @@ public class CodingAgentTool
         try
         {
             var fullPath = ResolvePath(path);
+            var fileName = Path.GetFileName(path);
+            var pathDirectory = Path.GetDirectoryName(path) ?? "";
             if (fullPath == null || !File.Exists(fullPath))
             {
-                return new { 
-                    error = "File not found.", 
-                    suggestion = "Use list_directory to verify the path exists relative to the root.",
-                    requestedPath = path 
-                };
+                return WithContext
+                (
+                    pathDirectory,
+                    new { 
+                        error = "File not found or access denied.", 
+                        suggestion = "Use list_directory to verify the path exists relative to the root.",
+                        requestedPath = path,
+                        availableRoots = AllowedRoots
+                    }
+                );
             }
 
             string usedPath = Path.GetDirectoryName(path) ?? "";
-            string fileName = Path.GetFileName(path);
 
             var content = await File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             

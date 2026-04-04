@@ -11,55 +11,64 @@ namespace CodingAgent.Tools;
 [McpServerToolType]
 public class CodingAgentTool
 {
-    private const int MaxFileReadChars = 50000;
-    private const int DefaultMaxSearchResults = 100;
-
+    private const int MaxFileReadChars = 20000; // Etwas kleiner für besseren Kontext-Flow
     private readonly LlmConfig _config;
     private readonly ILogger<CodingAgentTool> _logger;
 
     public CodingAgentTool(IOptions<LlmConfig> config, ILogger<CodingAgentTool> logger)
     {
-        ArgumentNullException.ThrowIfNull(config, nameof(config));  
-
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
         _logger = logger ?? new NullLogger<CodingAgentTool>();
     }
 
+    private string RootPath => Path.GetFullPath(_config.AllowedCodeDirectory);
+
+    /// <summary>
+    /// Erzeugt eine standardisierte Antwort, die das LLM über seinen Standort informiert.
+    /// </summary>
+    private object WrapResponse(string absoluteCurrentPath, object data)
+    {
+        var relativePath = Path.GetRelativePath(RootPath, absoluteCurrentPath);
+        if (relativePath == ".") relativePath = "/ (root)";
+
+        return new
+        {
+            agent_context = new {
+                cwd = relativePath,
+                can_go_up = absoluteCurrentPath.Length > RootPath.Length,
+                hint = $"You are in '{relativePath}'. You can use relative paths or '..' to go back."
+            },
+            payload = data
+        };
+    }
+  
+
     private string[] AllowedRoots => [Path.GetFullPath(_config.AllowedCodeDirectory)];
 
-    private object WithContext(string currentPath, object payload) => new
-    {
-        internal_state = new {
-            cwd = currentPath,
-            instruction = $"The user is currently browsing {currentPath}. Use this as the base for all relative paths."
-        },
-        data = payload
-    };
 
     [McpServerTool(Name = "list_allowed_directories")]
     [Description("Returns the list of allowed root directories. Use this to find your starting point.")]
     public object ListAllowedDirectories() => AllowedRoots;
 
-    [McpServerTool(Name = "change_directory")]
-    [Description("Changes the current working directory. 'path' must be relative to the allowed root.")]
-    public object ChangeDirectory([Description("Current working directory, where we navigated to.")]string currentWorkingDirectory, [Description("Name of the directory, in which we want to navigate, which is already in the current working directory.")] string targetDirectory)
+
+
+    [McpServerTool(Name = "navigate")]
+    [Description("Navigates to a directory. Supports '..' to go up or relative paths.")]
+    public object Navigate([Description("The current directory the AI is in.")] string currentDir, 
+                            [Description("The target (e.g. 'src', '..', 'sub/folder')")] string target)
     {
-        var oldWorkingDirectory = ResolvePath(currentWorkingDirectory);
-        var fullPath = ResolvePath(currentWorkingDirectory);
-        if (fullPath == null || !Directory.Exists(fullPath))
+        var baseDir = ResolvePath(currentDir) ?? RootPath;
+        var newPath = Path.GetFullPath(Path.Combine(baseDir, target));
+
+        if (!IsPathSafe(newPath) || !Directory.Exists(newPath))
         {
-            return new { error = "Path not found or access denied.", triedPath = currentWorkingDirectory, availableRoots = AllowedRoots };
+            return WrapResponse(baseDir, new { error = "Target directory not found or access denied." });
         }
 
-        var targetPath = Path.Combine(fullPath, targetDirectory);
+        var files = Directory.EnumerateFileSystemEntries(newPath)
+            .Select(p => new { name = Path.GetFileName(p), type = Directory.Exists(p) ? "dir" : "file" });
 
-        targetPath = ResolvePath(targetPath);
-
-        return WithContext(targetPath, new {
-            oldWorkingDirectory = oldWorkingDirectory,
-            newWorkingDirectory = targetPath,
-            availableFilesInNewDirectory = Directory.Exists(targetPath) ? Directory.EnumerateFileSystemEntries(targetPath).Select(Path.GetFileName).ToList() : null,
-            message = $"Changed directory from: {oldWorkingDirectory} to: {targetPath}" });
+        return WrapResponse(newPath, new { message = "Directory changed.", content = files });
     }
 
     [McpServerTool(Name = "list_directory")]
@@ -126,7 +135,7 @@ public class CodingAgentTool
                 .ToList();
 
             // Das entscheidende "Context-Wrapping"
-            return WithContext(fullPath,
+            return WrapResponse(fullPath,
                 new { 
                     context = new {
                         currentDirectoryName = Path.GetFileName(fullPath),
@@ -140,78 +149,62 @@ public class CodingAgentTool
         }
         catch (Exception ex)
         {
-            return WithContext(path,new { error = $"Error: {ex.Message}" });
+            return WrapResponse(path,new { error = $"Error: {ex.Message}" });
         }
-    }
+    }    
 
-    [McpServerTool(Name = "read_file")]
-    [Description(
-        "Reads the contents of a file from the provided, allowed directory and returns the full file content to the model. " +
-        "Use this tool for requests such as 'read', 'show', or 'list', when a file should be found and its contents displayed." +
-        "AFTER this tool runs, file content is available - NO other tools needed until the user asks explicitly for another file."
-        )]
-    public async Task<object> ReadFile([Description("Path to the file.")] string path, CancellationToken ct = default)
+[McpServerTool(Name = "read_file_segment")]
+[Description("Reads a file segment. You MUST provide the 'currentDirectory' you are in to maintain context.")]
+public async Task<object> ReadFileSegment(
+    [Description("The directory you are currently browsing (CWD).")] string currentDirectory,
+    [Description("The name of the file or a relative path from the current directory.")] string path, 
+    [Description("Character offset to start reading from")] int offset = 0)
+{
+    // 1. Wir kombinieren den aktuellen Standort der KI mit dem Dateinamen
+    var absoluteBase = ResolvePath(currentDirectory) ?? RootPath;
+    var targetPath = Path.Combine(absoluteBase, path);
+    
+    // 2. Wir validieren den finalen Pfad
+    var finalPath = Path.GetFullPath(targetPath);
+
+    if (!IsPathSafe(finalPath) || !File.Exists(finalPath))
     {
-        try
-        {
-            var fullPath = ResolvePath(path);
-            var fileName = Path.GetFileName(path);
-            var pathDirectory = Path.GetDirectoryName(path) ?? "";
-            if (fullPath == null || !File.Exists(fullPath))
-            {
-                return WithContext
-                (
-                    pathDirectory,
-                    new { 
-                        error = "File not found or access denied.", 
-                        suggestion = "Use list_directory to verify the path exists relative to the root.",
-                        requestedPath = path,
-                        availableRoots = AllowedRoots
-                    }
-                );
-            }
-
-            string usedPath = Path.GetDirectoryName(path) ?? "";
-
-            var content = await File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            
-            return WithContext(usedPath,new {
-                path = usedPath,
-                file = fileName,
-                contentLength =content.Length,
-                content = content.Length > MaxFileReadChars ? content[..MaxFileReadChars] + "\n[Truncated]" : content });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error reading file at path: {Path}", path);
-            return WithContext(path,new { error = $"Error: {ex.Message}" });
-        }
+        return WrapResponse(absoluteBase, new { 
+            error = "File not found.", 
+            attemptedPath = finalPath,
+            hint = "Ensure 'currentDirectory' is correct and 'path' is relative to it." 
+        });
     }
+
+    try 
+    {
+        var content = await File.ReadAllTextAsync(finalPath, Encoding.UTF8);
+        var segment = content.Skip(offset).Take(MaxFileReadChars).ToArray();
+        
+        // Wir geben den Verzeichnisnamen der Datei als neuen Kontext zurück
+        var fileDir = Path.GetDirectoryName(finalPath) ?? RootPath;
+
+        return WrapResponse(fileDir, new {
+            file = Path.GetFileName(finalPath),
+            content = new string(segment),
+            nextOffset = offset + segment.Length,
+            totalSize = content.Length,
+            isEndOfFile = (offset + segment.Length) >= content.Length
+        });
+    }
+    catch (Exception ex)
+    {
+        return WrapResponse(absoluteBase, new { error = $"Read error: {ex.Message}" });
+    }
+}
 
     private string? ResolvePath(string path)
     {
-        // Bereinige den Pfad von führenden Slashes, die das LLM oft mitschickt
-        path = path.TrimStart('/', '\\');
-        if (string.IsNullOrWhiteSpace(path)) path = ".";
-
-        foreach (var root in AllowedRoots)
-        {
-            try
-            {
-                var normalizedRoot = Path.GetFullPath(root);
-                var combinedPath = Path.GetFullPath(Path.Combine(normalizedRoot, path));
-
-                // Sicherheitscheck: Bleibt der Pfad innerhalb des Roots?
-                if (combinedPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
-                {
-                    return combinedPath;
-                }
-            }
-            catch(Exception ex)
-            {
-                _logger.LogError(ex, "Error resolving path: {Path} with root: {Root}", path, root);
-            }
-        }
-        return null;
+        if (string.IsNullOrWhiteSpace(path) || path == "/") return RootPath;
+        
+        var combined = Path.GetFullPath(Path.Combine(RootPath, path.TrimStart('/', '\\')));
+        return IsPathSafe(combined) ? combined : null;
     }
+
+    private bool IsPathSafe(string path) => path.StartsWith(RootPath, StringComparison.OrdinalIgnoreCase);
 }

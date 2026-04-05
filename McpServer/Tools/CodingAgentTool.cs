@@ -111,9 +111,17 @@ public class CodingAgentTool
         var files = Directory.EnumerateFileSystemEntries(newPath)
             .Select(p => new { name = Path.GetFileName(p), type = Directory.Exists(p) ? "dir" : "file" });
 
+            
+            var filePathAbsolute = newPath;
+
+            var filePathRelative = Path.GetRelativePath(RootPath, newPath)
+                                    .Replace('\\', '/');
+
         return WrapResponse(newPath, new {
             previousDirectory = baseDir,
             currentWorkingDirectory = newPath,
+            relativePath = filePathRelative,
+            absolutePath = filePathAbsolute,
             message = "Directory changed.", content = files });
     }
 

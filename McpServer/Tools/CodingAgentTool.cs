@@ -92,6 +92,7 @@ public class CodingAgentTool
     [Description(
         "Navigates to a directory. Supports '..' to go up or relative paths. " +
         "RULE: Just navigate through the directory structure. Do not speculate about file contents or structure. " +
+        "Only navigate and list the content." +
         "Do NOT give suggestions for other actions e.g. 'now you can read files'." +
         "Always use the tool output to maintain your current location context - do not use your memory." 
         )]
@@ -236,12 +237,24 @@ public class CodingAgentTool
             var segmentContent = new string(segment);
             
             // Das Verzeichnis der Datei für den nächsten Kontext-Schritt ermitteln
-            var fileDirAbsolute = Path.GetDirectoryName(finalPath) ?? RootPath;
+            var fileName = Path.GetFileName(finalPath);
+            var filePathAbsolute = Path.GetDirectoryName(finalPath) ?? RootPath;
 
-            return WrapResponse(fileDirAbsolute, new {
+            if(filePathAbsolute.EndsWith(fileName) == false)
+            {
+                filePathAbsolute = Path.Combine(filePathAbsolute, fileName);
+            }
+
+            filePathAbsolute = filePathAbsolute.Replace('\\', '/');
+
+            var filePathRelative = Path.GetRelativePath(RootPath, finalPath)
+                                    .Replace('\\', '/');
+
+            return WrapResponse(filePathAbsolute, new {
                 // REIN RELATIVE ANGABEN IM PAYLOAD:
-                fileName = Path.GetFileName(finalPath),
-                relativeFilePath = Path.GetRelativePath(RootPath, finalPath).Replace('\\', '/'),
+                fileName = fileName,
+                relativeFilePath = filePathRelative,
+                filePathAbsolute = filePathAbsolute,
                 content = segmentContent,
                 pagination = new {
                     nextOffset = offset + segment.Length,

@@ -20,6 +20,7 @@ builder.Logging
 })
 .AddDebug();
 
+
 var options = new McpServerOptions()
 {
     ServerInfo = new ModelContextProtocol.Protocol.Implementation()

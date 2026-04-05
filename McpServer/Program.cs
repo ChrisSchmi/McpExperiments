@@ -13,10 +13,12 @@ var builder = WebApplication.CreateBuilder(args);
 #endif
 
 // Logging to stderr
-builder.Logging.AddConsole(consoleLogOptions =>
+builder.Logging
+.AddConsole(consoleLogOptions =>
 {
     consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace;
-});
+})
+.AddDebug();
 
 var options = new McpServerOptions()
 {
